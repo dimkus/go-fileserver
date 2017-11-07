@@ -22,6 +22,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"crypto/subtle"
+	"crypto/sha256"
 )
 
 // ErrorHandler is the package wide callback function to handle file server
@@ -37,6 +39,28 @@ type ErrorHandlerFunc func(http.ResponseWriter, *http.Request, string, int)
 
 // NotFoundFunc is the type for the package variable NotFoundHandler.
 type NotFoundFunc func(http.ResponseWriter, *http.Request)
+
+type BasicAuth struct {
+	User		string
+	Pass		string
+	Realm		string
+	userHash	[]byte
+	passHash	[]byte
+	isEnabled	bool
+}
+
+func (BasicAuthObj *BasicAuth) UserHash() []byte {
+	return basicHash(BasicAuthObj.User)
+}
+
+func (BasicAuthObj *BasicAuth) PassHash() []byte {
+	return basicHash(BasicAuthObj.Pass)
+}
+
+func basicHash(s string) []byte {
+	val := sha256.Sum256([]byte(s))
+	return val[:]
+}
 
 // Error is the function to call when there is an error. If an ErrorHandler has
 // been specified that will be used. Otherwise it falls back to http.Error.
@@ -392,25 +416,13 @@ func serveFile(w http.ResponseWriter, r *http.Request, fs http.FileSystem, name 
 
 	// use contents of index.html for directory, if present
 	if d.IsDir() {
-		index := strings.TrimSuffix(name, "/") + indexPage
-		ff, err := fs.Open(index)
-		if err == nil {
-			defer ff.Close()
-			dd, err := ff.Stat()
-			if err == nil {
-				name = index
-				d = dd
-				f = ff
-			}
-		}
+		NotFound(w, r)
+		return
 	}
 
 	// Still a directory? (we didn't find an index.html file)
 	if d.IsDir() {
-		if checkLastModified(w, r, d.ModTime()) {
-			return
-		}
-		dirList(w, f)
+		NotFound(w, r)
 		return
 	}
 
@@ -436,7 +448,8 @@ func ServeFile(w http.ResponseWriter, r *http.Request, name string) {
 }
 
 type fileHandler struct {
-	root http.FileSystem
+	root		http.FileSystem
+	basicAuth	BasicAuth
 }
 
 // FileServer returns a handler that serves HTTP requests
@@ -446,11 +459,30 @@ type fileHandler struct {
 // use http.Dir:
 //
 //     http.Handle("/", http.FileServer(http.Dir("/tmp")))
-func FileServer(root http.FileSystem) http.Handler {
-	return &fileHandler{root}
+func FileServer(root http.FileSystem, auth BasicAuth) http.Handler {
+
+	if auth.User != "" {
+		auth.userHash = auth.UserHash()
+		auth.passHash = auth.PassHash()
+		auth.Pass = ""
+		auth.User = ""
+		auth.isEnabled = true
+	}
+
+	return &fileHandler{root, auth}
 }
 
 func (f *fileHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+
+	if f.basicAuth.isEnabled {
+		user, pass, ok := r.BasicAuth()
+		if !ok || subtle.ConstantTimeCompare(basicHash(user), f.basicAuth.userHash) != 1 || subtle.ConstantTimeCompare(basicHash(pass), f.basicAuth.passHash) != 1 {
+			w.Header().Set("WWW-Authenticate", `Basic realm="`+f.basicAuth.Realm+`"`)
+			http.Error(w, "Unauthorized.", http.StatusUnauthorized)
+			return
+		}
+	}
+
 	upath := r.URL.Path
 	if !strings.HasPrefix(upath, "/") {
 		upath = "/" + upath

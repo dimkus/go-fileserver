@@ -15,9 +15,14 @@ func main() {
 		fmt.Fprintln(w, "That page could not be found.")
 	}
 
+	fileserverAuth := fileserver.BasicAuth{}
+	fileserverAuth.User = "user"
+	fileserverAuth.Pass = "password"
+	fileserverAuth.Realm = "message"
+
 	// Serve a directory of files.
 	dir := http.Dir("./files")
-	http.ListenAndServe(":8080", fileserver.FileServer(dir))
+	http.ListenAndServe(":8080", fileserver.FileServer(dir, fileserverAuth))
 }
 
 // func main() {
